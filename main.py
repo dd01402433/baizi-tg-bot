@@ -147,10 +147,11 @@ def call_deepseek(prompt: str) -> Optional[str]:
                 ],
                 "max_tokens": 2000,
                 "temperature": 0.85,
+                "thinking": {"type": "disabled"},
             }).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         )
-        resp = json.loads(urllib.request.urlopen(req, timeout=25).read())
+        resp = json.loads(urllib.request.urlopen(req, timeout=60).read())
         return resp["choices"][0]["message"]["content"]
     except Exception as e:
         logger.error(f"DeepSeek API 错误: {e}")
