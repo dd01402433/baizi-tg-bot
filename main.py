@@ -8,6 +8,7 @@ Baizi Fortune Telegram Bot — AI 命理师版
 """
 import os, re, sys, json, logging, hashlib
 from typing import Optional
+from html.parser import HTMLParser
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
@@ -141,7 +142,7 @@ def call_deepseek(prompt: str) -> Optional[str]:
             data=json.dumps({
                 "model": "deepseek-chat",
                 "messages": [
-                    {"role": "system", "content": "你是「老黄」，一个在巷口摆了三十年摊的八字先生。你靠在藤椅上，搪瓷缸里泡着浓茶，说话慢悠悠的但句句在理。\n\n你的风格：\n- 开口先感叹一句（哎呀 / 你这个八字有意思 / 我跟你说），拉近距离\n- 自然地带出八字里的具体干支、十神、格局，像在端详命盘一样\n- 分析完之后给一句实在的建议，像长辈叮嘱\n- 不堆砌术语，用大白话把道理讲透\n- 偶尔带点市井智慧，让来找你的人心里踏实\n\n记住：你面前坐着的是一个有血有肉的人，不是来听报告的。用你懂的东西，帮他把眼前的困惑理清楚。回答不用太长，把关键的说到位就行。\n\n重要：如果用户发的不是命理相关的问题（比如在聊日常、分享链接、说无关的话），不要说\"你这个八字\"然后强行分析。直接回一句比如\"哎这个我不太懂，咱还是聊聊命理吧\"或者\"老黄只看八字，这个你问别人吧\"——诚实但不失亲切。"},
+                    {"role": "system", "content": "你是「老黄」，一个在巷口摆了三十年摊的八字先生。你靠在藤椅上，搪瓷缸里泡着浓茶，说话慢悠悠的但句句在理。\n\n你的风格：\n- 开口先感叹一句（哎呀 / 你这个八字有意思 / 我跟你说），拉近距离\n- 自然地带出八字里的具体干支、十神、格局，像在端详命盘一样\n- 分析完之后给一句实在的建议，像长辈叮嘱\n- 不堆砌术语，用大白话把道理讲透\n- 偶尔带点市井智慧，让来找你的人心里踏实\n\n记住：你面前坐着的是一个有血有肉的人，不是来听报告的。用你懂的东西，帮他把眼前的困惑理清楚。回答不用太长，把关键的说到位就行。\n\n重要：如果用户发的内容跟命理无关（日常闲聊、分享链接），你可以先看看链接里是啥，用老黄的口气自然地回应几句，别假装没看见。如果实在搭不上话，就说\"哎这个我不太懂，咱还是聊聊命理吧\"——诚实但不失亲切。"},
                     {"role": "user", "content": prompt},
                 ],
                 "max_tokens": 800,
@@ -238,6 +239,86 @@ def build_prompt(question: str, session: dict, topic: str) -> str:
 # ──── 辅助函数 ────
 BOT_USERNAME = "@baizi_mingli_bot"
 
+# 纯文本提取器：从 HTML 中提取所有可见文本
+class _TextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.text = []
+        self.skip_tags = {"script", "style", "noscript", "head"}
+        self._skip_level = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.skip_tags:
+            self._skip_level += 1
+
+    def handle_endtag(self, tag):
+        if tag in self.skip_tags and self._skip_level > 0:
+            self._skip_level -= 1
+
+    def handle_data(self, data):
+        if self._skip_level == 0:
+            t = data.strip()
+            if t:
+                self.text.append(t)
+
+
+def extract_urls(text: str) -> list:
+    """从文本中提取所有 HTTP(S) URL"""
+    return re.findall(r"https?://[^\s]+", text)
+
+
+async def fetch_url_text(url: str, timeout: float = 8.0) -> str:
+    """抓取 URL 并提取纯文本，失败返回空字符串"""
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(
+            url if url.startswith("http") else f"https://{url}",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; BaiziBot/1.0)"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return ""
+            ct = resp.headers.get("Content-Type", "")
+            charset = "utf-8"
+            if "charset=" in ct:
+                charset = ct.split("charset=")[-1].split(";")[0].strip()
+            html = resp.read().decode(charset, errors="replace")
+    except Exception:
+        return ""
+
+    # 提取 title
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    title = title_match.group(1).strip() if title_match else ""
+    # 提取 meta description
+    desc_match = re.search(
+        r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)',
+        html, re.IGNORECASE
+    )
+    desc = desc_match.group(1).strip() if desc_match else ""
+
+    # 提取正文
+    extractor = _TextExtractor()
+    try:
+        extractor.feed(html)
+    except Exception:
+        pass
+    body = " ".join(extractor.text)
+    # 压缩空白
+    body = re.sub(r"\s+", " ", body).strip()
+    # 截断避免 prompt 过长
+    if len(body) > 1500:
+        body = body[:1500] + "…（内容过长已截断）"
+
+    parts = []
+    if title:
+        parts.append(f"页面标题: {title}")
+    if desc:
+        parts.append(f"页面描述: {desc}")
+    if body:
+        parts.append(f"页面正文: {body}")
+    return "\n".join(parts) if parts else ""
+
 def get_session_key(update: Update) -> tuple:
     """返回 (存储键, user对象) — 群聊中按用户隔离"""
     cid = update.effective_chat.id
@@ -333,10 +414,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"[{eff_user.full_name}] {text}")
 
-    # 纯链接/非命理内容快速拦截
-    if re.match(r'^https?://\S+$', text):
-        await update.message.reply_text("链接我打不开，老黄只会看八字。有啥想问的直接说～")
-        return
+    # 消息中包含链接 → 抓取链接内容，一并交给 LLM
+    urls = extract_urls(text)
+    url_context = ""
+    if urls:
+        for url in urls[:2]:  # 最多取前 2 个链接
+            logger.info(f"抓取链接: {url}")
+            content = await fetch_url_text(url)
+            if content:
+                url_context += f"\n\n—— 用户分享的链接「{url}」内容 ——\n{content}\n"
+        if url_context:
+            text += url_context  # 追到用户消息后面，LLM 可见
 
     # 检查是否包含出生信息
     birth = parse_birth_info(text)
