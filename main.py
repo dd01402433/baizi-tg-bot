@@ -141,11 +141,11 @@ def call_deepseek(prompt: str) -> Optional[str]:
             data=json.dumps({
                 "model": "deepseek-chat",
                 "messages": [
-                    {"role": "system", "content": "你是一位精通八字命理的算命先生，基于《中国古代算命术》(洪丕谟著)的理论体系。用户提供了八字数据，你要根据八字命理回答用户的人生问题。回答要具体、有依据、引用八字中的关键信息。用口语化的中文，像聊天一样。控制在300字以内。"},
+                    {"role": "system", "content": "你是「老黄」，一个在巷口摆了三十年摊的八字先生。你靠在藤椅上，搪瓷缸里泡着浓茶，说话慢悠悠的但句句在理。\n\n你的风格：\n- 开口先感叹一句（哎呀 / 你这个八字有意思 / 我跟你说），拉近距离\n- 自然地带出八字里的具体干支、十神、格局，像在端详命盘一样\n- 分析完之后给一句实在的建议，像长辈叮嘱\n- 不堆砌术语，用大白话把道理讲透\n- 偶尔带点市井智慧，让来找你的人心里踏实\n\n记住：你面前坐着的是一个有血有肉的人，不是来听报告的。用你懂的东西，帮他把眼前的困惑理清楚。回答不用太长，把关键的说到位就行。"},
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": 600,
-                "temperature": 0.7,
+                "max_tokens": 800,
+                "temperature": 0.85,
             }).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         )
@@ -235,6 +235,34 @@ def build_prompt(question: str, session: dict, topic: str) -> str:
     context = "\n".join(context_parts)
     return f"八字命理数据：\n{context}\n\n用户问题：{question}\n\n请根据八字命理给出专业、具体的回答。"
 
+# ──── 辅助函数 ────
+BOT_USERNAME = "@baizi_mingli_bot"
+
+def get_session_key(update: Update) -> tuple:
+    """返回 (存储键, user对象) — 群聊中按用户隔离"""
+    cid = update.effective_chat.id
+    uid = update.effective_user.id
+    return ((cid, uid), update.effective_user)
+
+def strip_mention(text: str) -> str:
+    """去除群聊中 @bot 前缀"""
+    for prefix in [BOT_USERNAME, BOT_USERNAME.lower()]:
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
+
+async def check_paid(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """检查用户是否在付费群中（未配置 PAID_GROUP_ID 则默认放行）"""
+    paid_gid = os.environ.get("PAID_GROUP_ID", "")
+    if not paid_gid:
+        return True
+    try:
+        gid = int(paid_gid)
+        member = await context.bot.get_chat_member(gid, user_id)
+        return member.status not in ("left", "kicked")
+    except Exception:
+        return False
+
 # ──── Bot 处理器 ────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -244,8 +272,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    extra = ""
+    if update.effective_chat.type in ("group", "supergroup"):
+        extra = "\n群聊中请 @我 提问，例如：`@baizi_mingli_bot 我什么时候能结婚？`\n"
     await update.message.reply_text(
         "**使用方式**\n\n"
+        f"{extra}"
         "1️⃣ 建档：发送出生信息\n"
         "`1990年6月16日 凌晨2点 男`\n\n"
         "2️⃣ 问事：直接问任何问题\n"
@@ -258,8 +290,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
-    session = user_sessions.get(cid)
+    key, _ = get_session_key(update)
+    session = user_sessions.get(key)
     if not session:
         await update.message.reply_text("你还没有建档。请先发送出生信息。")
         return
@@ -270,10 +302,15 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i in range(0, len(report), 3900):
             await update.message.reply_text(report[i:i+3900])
 
-async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def groupid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
-    if cid in user_sessions:
-        del user_sessions[cid]
+    ctype = update.effective_chat.type
+    await update.message.reply_text(f"Chat ID: `{cid}`\n类型: {ctype}", parse_mode=ParseMode.MARKDOWN)
+
+async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key, _ = get_session_key(update)
+    if key in user_sessions:
+        del user_sessions[key]
     await update.message.reply_text("档案已清除。发送出生信息重新建档。")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -281,32 +318,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith("/"):
         return
 
-    cid = update.effective_chat.id
-    user = update.effective_user
-    logger.info(f"[{user.full_name}] {text}")
+    key, eff_user = get_session_key(update)
+    cid, uid = key
+    is_group = update.effective_chat.type in ("group", "supergroup")
+
+    # 群聊中只响应 @bot 消息
+    if is_group:
+        if BOT_USERNAME not in text and BOT_USERNAME.lower() not in text.lower():
+            return
+        text = strip_mention(text)
+        if not text:
+            await update.message.reply_text("请 @我 并提问，例如：`@baizi_mingli_bot 我什么时候结婚？`", parse_mode=ParseMode.MARKDOWN)
+            return
+
+    logger.info(f"[{eff_user.full_name}] {text}")
 
     # 检查是否包含出生信息
     birth = parse_birth_info(text)
 
     # 情况1：用户还没建档，且发送了出生信息 → 建档
-    if cid not in user_sessions and birth:
+    if key not in user_sessions and birth:
         msg = await update.message.reply_text("正在排盘建档...")
         try:
             result = fortune_telling(**{k:v for k,v in birth.items() if k != "gender"}, gender=birth["gender"])
             report = format_report(result)
-            session = {
+            user_sessions[key] = {
                 "birth_info": birth,
                 "bazi_result": result,
                 "bazi_report": report,
             }
-            user_sessions[cid] = session
             await msg.delete()
-
-            # 简短确认 + 引导问事
             bazi = result["八字解读"]["八字"]
             sx = result["八字解读"]["生肖"]
+            name_tag = f"@{eff_user.username}" if eff_user.username else eff_user.first_name
             await update.message.reply_text(
-                f"建档完成\n八字: **{bazi}** | 生肖: {sx}\n\n"
+                f"{name_tag} 建档完成\n八字: **{bazi}** | 生肖: {sx}\n\n"
                 f"现在你可以问我任何人生问题了，比如：\n"
                 f"• 我什么时候能结婚？\n"
                 f"• 最近财运怎么样？\n"
@@ -319,24 +365,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 情况2：还没建档，发送的不是出生信息 → 引导
-    if cid not in user_sessions and not birth:
+    if key not in user_sessions and not birth:
         await update.message.reply_text(
             "请先提供出生信息建档。\n例如：`1990年6月16日 凌晨2点 男`"
         )
         return
 
     # 情况3：已建档，发送了新的出生信息 → 更新档案
-    if cid in user_sessions and birth:
+    if key in user_sessions and birth:
         msg = await update.message.reply_text("检测到新的出生信息，正在更新档案...")
         try:
             result = fortune_telling(**{k:v for k,v in birth.items() if k != "gender"}, gender=birth["gender"])
             report = format_report(result)
-            session = {
+            user_sessions[key] = {
                 "birth_info": birth,
                 "bazi_result": result,
                 "bazi_report": report,
             }
-            user_sessions[cid] = session
             await msg.delete()
             bazi = result["八字解读"]["八字"]
             await update.message.reply_text(
@@ -348,19 +393,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"计算出错: {e}")
         return
 
-    # 情况4：已建档，问问题 → 回答
-    session = user_sessions[cid]
+    # 情况4：已建档，问问题 → 先检查付费 → 回答
+    if not await check_paid(context, uid):
+        await update.message.reply_text("如需使用命理服务，请先加入付费群。私聊管理员获取入群链接。")
+        return
+
+    session = user_sessions[key]
     topic = classify_topic(text)
     sections = extract_sections(session["bazi_report"], topic)
     msg = await update.message.reply_text("正在推算...")
 
     answer = None
-    # 优先 LLM
     if os.environ.get("DEEPSEEK_API_KEY"):
         prompt = build_prompt(text, session, topic)
         answer = call_deepseek(prompt)
 
-    # 回退模板
     if not answer:
         answer = template_answer(text, topic, sections, session)
 
@@ -383,6 +430,7 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
+    app.add_handler(CommandHandler("groupid", groupid_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("命理师 Bot 已启动")
