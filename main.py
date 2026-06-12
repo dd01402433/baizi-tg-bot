@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""
+Baizi Fortune Telegram Bot — AI 命理师版
+先提供出生信息建档，之后可问任何人生问题，Bot 根据八字命理作答。
+
+部署: 上传 GitHub → Railway → 设置环境变量 TG_BOT_TOKEN
+可选 LLM 增强: 设置 DEEPSEEK_API_KEY
+"""
+import os, re, sys, json, logging, hashlib
+from typing import Optional
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.constants import ParseMode
+
+from baizi_fortune import fortune_telling, format_report
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("baizi-bot")
+
+# ──── 会话存储（Railway 重启会丢失，生产可换 Redis） ────
+user_sessions: dict[int, dict] = {}
+
+# ──── 自然语言解析器 ────
+PERIOD_OFFSET = {"凌晨":0,"半夜":0,"深夜":0,"早上":8,"早晨":8,"上午":10,"中午":12,"正午":12,"下午":14,"傍晚":17,"黄昏":18,"晚上":20,"夜晚":20,"夜里":21}
+SHI_CHEN_TO_HOUR = {"子时":0,"丑时":2,"寅时":4,"卯时":6,"辰时":8,"巳时":10,"午时":12,"未时":14,"申时":16,"酉时":18,"戌时":20,"亥时":22}
+
+def parse_birth_info(text: str) -> Optional[dict]:
+    text = text.strip()
+    result = {}
+    result["gender"] = "女" if "女" in text else "男"
+    m = re.search(r"(19\d{2}|20[01]\d)", text)
+    if not m: return None
+    year = int(m.group(1))
+    if year < 1901 or year > 2000: return None
+    result["year"] = year
+    month = day = None
+    m_cn = re.search(r"(?P<month>\d{1,2})\s*月\s*(?P<day>\d{1,2})\s*日", text)
+    if m_cn: month, day = int(m_cn.group("month")), int(m_cn.group("day"))
+    if month is None:
+        after = text[m.end():]
+        m_sep = re.search(r"(?:^|[^\d])(?P<month>\d{1,2})\s*[-/.]\s*(?P<day>\d{1,2})", after)
+        if m_sep: month, day = int(m_sep.group("month")), int(m_sep.group("day"))
+    if month is None:
+        after = text[m.end():]
+        nums = [int(n) for n in re.findall(r"\d+", after) if int(n) <= 31]
+        if len(nums) >= 2:
+            month, day = nums[0], nums[1]
+            if month > 12: month, day = day, month
+    if month is None or month < 1 or month > 12 or day is None or day < 1 or day > 31: return None
+    result["month"], result["day"] = month, day
+    hour, minute, has_t = 12, 0, False
+    for sc, h in SHI_CHEN_TO_HOUR.items():
+        if sc in text: hour, has_t = h, True; break
+    tm = re.search(r"(\d{1,2})\s*[点:：时]\s*(\d{1,2})?\s*(分)?", text)
+    if tm:
+        rh, rm = int(tm.group(1)), int(tm.group(2)) if tm.group(2) else 0
+        has_t = True
+        period = next((p for p in PERIOD_OFFSET if p in text), None)
+        if period:
+            if period in ("凌晨","半夜","深夜"): hour = 0 if rh == 12 else rh
+            elif period in ("早上","早晨","上午"): hour = rh
+            elif period in ("中午","正午"): hour = 12
+            elif period in ("下午","傍晚","黄昏"): hour = 12 if rh == 12 else rh + 12
+            elif period in ("晚上","夜晚","夜里"): hour = 0 if rh == 12 else rh + 12
+        else: hour = rh
+        minute = rm
+    if not has_t:
+        for p in PERIOD_OFFSET:
+            if p in text: hour = PERIOD_OFFSET[p]; break
+    if hour > 23: hour %= 24
+    result["hour"], result["minute"] = hour, minute
+    return result
+
+# ──── 问题分类 → 八字报告章节 ────
+TOPIC_KEYWORDS = {
+    "感情": ["感情","恋爱","结婚","姻缘","桃花","对象","分手","单身","老公","老婆","男朋友","女朋友","正缘"],
+    "事业": ["事业","工作","职业","跳槽","升职","创业","公司","老板","同事","适合做","行业","前途"],
+    "财运": ["财运","赚钱","收入","财富","投资","生意","钱","买","赔","发财","穷"],
+    "健康": ["健康","身体","生病","疾病","医院","不舒服","体质","寿命","养生"],
+    "运势": ["运势","运气","流年","今年","明年","最近","什么时候","何时","什么时候转运"],
+    "性格": ["性格","脾气","优点","缺点","是什么样的人","个性"],
+    "六亲": ["父母","爸妈","兄弟姐妹","子女","孩子","儿子","女儿","家庭"],
+}
+
+TOPIC_TO_SECTIONS = {
+    "感情": ["十神分析","神煞","六亲","大运走势"],
+    "事业": ["用神喜忌","格局判定","十神分析","大运走势","日干强弱分析"],
+    "财运": ["十神分析","用神喜忌","大运走势"],
+    "健康": ["健康提示","五行力量分析","日干强弱分析"],
+    "运势": ["大运走势","用神喜忌","日干强弱分析"],
+    "性格": ["日干强弱分析","十神分析","格局判定","五行力量分析"],
+    "六亲": ["六亲参考","十神分析"],
+}
+
+def classify_topic(question: str) -> str:
+    for topic, keywords in TOPIC_KEYWORDS.items():
+        for kw in keywords:
+            if kw in question:
+                return topic
+    return "综合"
+
+def extract_sections(report_text: str, topic: str) -> str:
+    """从完整报告文本中提取与话题相关的章节"""
+    sections = TOPIC_TO_SECTIONS.get(topic, [])
+    lines = report_text.split("\n")
+    extracted = []
+    current_section = None
+    collecting = False
+    section_map = {
+        "日干强弱分析": "日干强弱", "五行力量分析": "五行", "用神喜忌": "用神",
+        "十神分析": "十神", "格局判定": "格局", "大运走势": "大运",
+        "神煞": "神煞标注", "健康提示": "健康", "六亲参考": "六亲",
+    }
+    for line in lines:
+        clean = line.strip()
+        if clean.startswith("## "):
+            sec_name = clean[3:].strip()
+            current_section = sec_name
+            collecting = any(sec_name.startswith(s) or s in sec_name for s in sections)
+        if collecting and clean:
+            extracted.append(line)
+    if not extracted:
+        # 至少返回基本信息 + 日干
+        for line in lines:
+            clean = line.strip()
+            if clean.startswith("#") or clean.startswith("-") or clean.startswith("|"):
+                extracted.append(line)
+            if len(extracted) > 30:
+                break
+    return "\n".join(extracted[:120])  # 限制长度
+
+# ──── LLM 回答生成 ────
+def call_deepseek(prompt: str) -> Optional[str]:
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.deepseek.com/v1/chat/completions",
+            data=json.dumps({
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": "你是一位精通八字命理的算命先生，基于《中国古代算命术》(洪丕谟著)的理论体系。用户提供了八字数据，你要根据八字命理回答用户的人生问题。回答要具体、有依据、引用八字中的关键信息。用口语化的中文，像聊天一样。控制在300字以内。"},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": 600,
+                "temperature": 0.7,
+            }).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        )
+        resp = json.loads(urllib.request.urlopen(req, timeout=25).read())
+        return resp["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.error(f"DeepSeek API 错误: {e}")
+        return None
+
+def template_answer(question: str, topic: str, sections: str, session: dict) -> str:
+    """模板引擎回答（无 LLM 时使用）"""
+    bz = session.get("bazi_result", {})
+    r = bz.get("八字解读", {})
+    si_zhu = bz.get("四柱", {})
+    bazi_str = r.get("八字", "")
+
+    answers = {
+        "感情": (
+            f"你的八字为 **{bazi_str}**。\n\n"
+            f"日支（配偶宫）为 **{si_zhu.get('日支','')}**，代表你的婚姻状态和另一半的特质。"
+            f"命中桃花/神煞情况以及十神中正官正财的旺衰决定了感情走向。\n\n"
+            f"以下是你的命盘相关部分，可自行对照：\n\n{sections[:800]}"
+        ),
+        "事业": (
+            f"你的八字为 **{bazi_str}**。\n\n"
+            f"日主 **{si_zhu.get('日干','')}（{r.get('日干强弱',{}).get('强度等级','')}）**，"
+            f"用神五行: {'、'.join(r.get('用神',{}).get('用神五行',[]))}，适合往用神五行的行业发展。"
+            f"格局上，你有 **{'、'.join([g.get('格局','') for g in r.get('格局',[])])}** 的特质。\n\n"
+            f"详细命盘：\n\n{sections[:800]}"
+        ),
+        "财运": (
+            f"你的八字为 **{bazi_str}**。\n\n"
+            f"财运看十神中正偏财的旺衰，以及用神是否得助。"
+            f"你的用神为 **{'、'.join(r.get('用神',{}).get('用神五行',[]))}**。\n\n"
+            f"大运走势决定了不同阶段的财运起伏：\n\n{sections[:800]}"
+        ),
+        "健康": (
+            f"你的八字为 **{bazi_str}**。\n\n"
+            f"五行分布失衡之处即健康薄弱环节：\n\n{sections[:1000]}"
+        ),
+        "运势": (
+            f"你的八字为 **{bazi_str}**。\n\n"
+            f"当前大运走势决定近期运势：\n\n{sections[:1000]}"
+        ),
+        "性格": (
+            f"你的八字为 **{bazi_str}**。\n\n"
+            f"日主为 **{si_zhu.get('日干','')}**，五行属 **{r.get('五行',{})}**，决定了你的核心性格特质。"
+            f"十神分布和格局进一步刻画了你的为人处世方式。\n\n{sections[:800]}"
+        ),
+        "六亲": (
+            f"你的八字为 **{bazi_str}**。\n\n{sections[:800]}"
+        ),
+    }
+    base = answers.get(topic, f"你的八字为 **{bazi_str}**。\n\n{sections[:1500]}")
+    # 加一句引导
+    base += "\n\n💡 *以上解读基于八字命理，仅供娱乐参考。*"
+    return base
+
+# ──── 构建 LLM Prompt ────
+def build_prompt(question: str, session: dict, topic: str) -> str:
+    bz = session.get("bazi_result", {})
+    r = bz.get("八字解读", {})
+    si_zhu = bz.get("四柱", {})
+    cg = bz.get("秤骨算命", {})
+
+    context_parts = [
+        f"用户八字: {r.get('八字','')}",
+        f"生肖: {r.get('生肖','')}",
+        f"日主: {si_zhu.get('日干','')}（五行{r.get('日干强弱',{}).get('强度等级','')}）",
+        f"格局: {'、'.join([g.get('格局','') for g in r.get('格局',[])])}",
+    ]
+    if r.get("用神"):
+        ys = r["用神"]
+        context_parts.append(f"用神: {'、'.join(ys.get('用神五行',[]))}，忌神: {'、'.join(ys.get('忌神五行',[]))}")
+
+    dy = r.get("大运", {})
+    if dy.get("大运列表"):
+        context_parts.append(f"起运: {dy.get('起运年龄','?')}岁，大运: {' → '.join([d['干支'] for d in dy['大运列表'][:4]])}")
+
+    ss = r.get("神煞", {})
+    if ss:
+        context_parts.append(f"神煞: 吉神={'、'.join(ss.get('吉神',[]))}，凶煞={'、'.join(ss.get('凶煞',[]))}")
+
+    if cg:
+        context_parts.append(f"秤骨: {cg.get('总骨重','')}（{cg.get('等级','')}）")
+
+    context = "\n".join(context_parts)
+    return f"八字命理数据：\n{context}\n\n用户问题：{question}\n\n请根据八字命理给出专业、具体的回答。"
+
+# ──── Bot 处理器 ────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "我是命理师 Bot。请先告诉我你的出生信息建档。\n\n"
+        "例如：`1990年6月16日 凌晨2点 男`\n\n"
+        "建档后，你可以随时问我任何人生问题。"
+    )
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "**使用方式**\n\n"
+        "1️⃣ 建档：发送出生信息\n"
+        "`1990年6月16日 凌晨2点 男`\n\n"
+        "2️⃣ 问事：直接问任何问题\n"
+        "`我什么时候能结婚？`\n"
+        "`最近财运怎么样？`\n"
+        "`我适合做什么工作？`\n\n"
+        "/report - 查看完整命盘\n"
+        "/clear - 清除档案重新建档",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    session = user_sessions.get(cid)
+    if not session:
+        await update.message.reply_text("你还没有建档。请先发送出生信息。")
+        return
+    report = session.get("bazi_report", "")
+    if len(report) <= 4000:
+        await update.message.reply_text(report)
+    else:
+        for i in range(0, len(report), 3900):
+            await update.message.reply_text(report[i:i+3900])
+
+async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    if cid in user_sessions:
+        del user_sessions[cid]
+    await update.message.reply_text("档案已清除。发送出生信息重新建档。")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text.startswith("/"):
+        return
+
+    cid = update.effective_chat.id
+    user = update.effective_user
+    logger.info(f"[{user.full_name}] {text}")
+
+    # 检查是否包含出生信息
+    birth = parse_birth_info(text)
+
+    # 情况1：用户还没建档，且发送了出生信息 → 建档
+    if cid not in user_sessions and birth:
+        msg = await update.message.reply_text("正在排盘建档...")
+        try:
+            result = fortune_telling(**{k:v for k,v in birth.items() if k != "gender"}, gender=birth["gender"])
+            report = format_report(result)
+            session = {
+                "birth_info": birth,
+                "bazi_result": result,
+                "bazi_report": report,
+            }
+            user_sessions[cid] = session
+            await msg.delete()
+
+            # 简短确认 + 引导问事
+            bazi = result["八字解读"]["八字"]
+            sx = result["八字解读"]["生肖"]
+            await update.message.reply_text(
+                f"建档完成\n八字: **{bazi}** | 生肖: {sx}\n\n"
+                f"现在你可以问我任何人生问题了，比如：\n"
+                f"• 我什么时候能结婚？\n"
+                f"• 最近财运怎么样？\n"
+                f"• 我适合做什么工作？",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as e:
+            await msg.delete()
+            await update.message.reply_text(f"计算出错: {e}")
+        return
+
+    # 情况2：还没建档，发送的不是出生信息 → 引导
+    if cid not in user_sessions and not birth:
+        await update.message.reply_text(
+            "请先提供出生信息建档。\n例如：`1990年6月16日 凌晨2点 男`"
+        )
+        return
+
+    # 情况3：已建档，发送了新的出生信息 → 更新档案
+    if cid in user_sessions and birth:
+        msg = await update.message.reply_text("检测到新的出生信息，正在更新档案...")
+        try:
+            result = fortune_telling(**{k:v for k,v in birth.items() if k != "gender"}, gender=birth["gender"])
+            report = format_report(result)
+            session = {
+                "birth_info": birth,
+                "bazi_result": result,
+                "bazi_report": report,
+            }
+            user_sessions[cid] = session
+            await msg.delete()
+            bazi = result["八字解读"]["八字"]
+            await update.message.reply_text(
+                f"档案已更新\n八字: **{bazi}**\n\n可以继续问事了。",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as e:
+            await msg.delete()
+            await update.message.reply_text(f"计算出错: {e}")
+        return
+
+    # 情况4：已建档，问问题 → 回答
+    session = user_sessions[cid]
+    topic = classify_topic(text)
+    sections = extract_sections(session["bazi_report"], topic)
+    msg = await update.message.reply_text("正在推算...")
+
+    answer = None
+    # 优先 LLM
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        prompt = build_prompt(text, session, topic)
+        answer = call_deepseek(prompt)
+
+    # 回退模板
+    if not answer:
+        answer = template_answer(text, topic, sections, session)
+
+    await msg.delete()
+    if len(answer) <= 4000:
+        await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
+    else:
+        for i in range(0, len(answer), 3900):
+            await update.message.reply_text(answer[i:i+3900], parse_mode=ParseMode.MARKDOWN)
+
+# ──── 主入口 ────
+def main():
+    token = os.environ.get("TG_BOT_TOKEN", "")
+    if not token:
+        print("错误: 请设置环境变量 TG_BOT_TOKEN")
+        sys.exit(1)
+
+    app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("report", report_cmd))
+    app.add_handler(CommandHandler("clear", clear_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    logger.info("命理师 Bot 已启动")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
