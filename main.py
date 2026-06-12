@@ -211,31 +211,27 @@ def build_prompt(question: str, session: dict, topic: str) -> str:
     bz = session.get("bazi_result", {})
     r = bz.get("八字解读", {})
     si_zhu = bz.get("四柱", {})
-    cg = bz.get("秤骨算命", {})
 
-    context_parts = [
-        f"用户八字: {r.get('八字','')}",
-        f"生肖: {r.get('生肖','')}",
-        f"日主: {si_zhu.get('日干','')}（五行{r.get('日干强弱',{}).get('强度等级','')}）",
-        f"格局: {'、'.join([g.get('格局','') for g in r.get('格局',[])])}",
-    ]
+    # 极度精简：只给 LLM 核心命盘线索，不给结构化数据列表，避免它复述
+    bazi_str = r.get('八字','')
+    rizhu = si_zhu.get('日干','')
+    rizhu_strength = r.get('日干强弱',{}).get('强度等级','')
+    patterns = '、'.join([g.get('格局','') for g in r.get('格局',[])]) if r.get('格局') else ''
+    
+    ys_info = ""
     if r.get("用神"):
         ys = r["用神"]
-        context_parts.append(f"用神: {'、'.join(ys.get('用神五行',[]))}，忌神: {'、'.join(ys.get('忌神五行',[]))}")
+        ys_info = f"用神{'、'.join(ys.get('用神五行',[]))}忌神{'、'.join(ys.get('忌神五行',[]))}"
 
+    dy_info = ""
     dy = r.get("大运", {})
     if dy.get("大运列表"):
-        context_parts.append(f"起运: {dy.get('起运年龄','?')}岁，大运: {' → '.join([d['干支'] for d in dy['大运列表'][:4]])}")
+        dy_info = f" {dy.get('起运年龄','')}岁起运，当前在{' → '.join([d['干支'] for d in dy['大运列表'][:2]])}大运"
 
-    ss = r.get("神煞", {})
-    if ss:
-        context_parts.append(f"神煞: 吉神={'、'.join(ss.get('吉神',[]))}，凶煞={'、'.join(ss.get('凶煞',[]))}")
+    # 一行自然语言，不给结构化清单
+    context = f"命主八字{bazi_str}，日主{rizhu}（{rizhu_strength}），{patterns}格。{ys_info}。{dy_info}。"
 
-    if cg:
-        context_parts.append(f"秤骨: {cg.get('总骨重','')}（{cg.get('等级','')}）")
-
-    context = "\n".join(context_parts)
-    return f"八字命理数据：\n{context}\n\n用户问题：{question}\n\n请根据八字命理给出专业、具体的回答。"
+    return f"{context}\n\n用户问：{question}\n\n记住：不要复述命盘数据，直接对应用户的问题来聊，把命理知识融进对话里。"
 
 # ──── 辅助函数 ────
 BOT_USERNAME = "@baizi_mingli_bot"
