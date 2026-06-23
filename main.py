@@ -29,10 +29,10 @@ def parse_birth_info(text: str) -> Optional[dict]:
     text = text.strip()
     result = {}
     result["gender"] = "女" if "女" in text else "男"
-    m = re.search(r"(19\d{2}|20[01]\d)", text)
+    m = re.search(r"(19\d{2}|20\d{2})", text)
     if not m: return None
     year = int(m.group(1))
-    if year < 1901 or year > 2000: return None
+    if year < 1901 or year > 2099: return None
     result["year"] = year
     month = day = None
     m_cn = re.search(r"(?P<month>\d{1,2})\s*月\s*(?P<day>\d{1,2})\s*日", text)
@@ -425,14 +425,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 检查是否包含出生信息
     birth = parse_birth_info(text)
-
-    # 情况1：用户还没建档，且发送了出生信息 → 建档
-    if key not in user_sessions and birth:
-        msg = await update.message.reply_text("正在排盘建档...")
+    
+    # 消息中带出生信息 → 始终按这个八字回答，不碰自己档案
+    if birth:
+        msg = await update.message.reply_text("正在排盘...")
         try:
             result = fortune_telling(**{k:v for k,v in birth.items() if k != "gender"}, gender=birth["gender"])
             report = format_report(result)
-            user_sessions[key] = {
+            # 使用临时 session key，不覆盖用户自己的档案
+            temp_key = (cid, uid)  # 本轮查询临时使用
+            user_sessions[temp_key] = {
                 "birth_info": birth,
                 "bazi_result": result,
                 "bazi_report": report,
@@ -440,13 +442,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.delete()
             bazi = result["八字解读"]["八字"]
             sx = result["八字解读"]["生肖"]
-            name_tag = f"@{eff_user.username}" if eff_user.username else eff_user.first_name
             await update.message.reply_text(
-                f"{name_tag} 建档完成\n八字: **{bazi}** | 生肖: {sx}\n\n"
-                f"现在你可以问我任何人生问题了，比如：\n"
-                f"• 我什么时候能结婚？\n"
-                f"• 最近财运怎么样？\n"
-                f"• 我适合做什么工作？",
+                f"八字: **{bazi}** | 生肖: {sx}\n\n现在可以问事了。",
                 parse_mode=ParseMode.MARKDOWN,
             )
         except Exception as e:
@@ -454,36 +451,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"计算出错: {e}")
         return
 
-    # 情况2：还没建档，发送的不是出生信息 → 引导
-    if key not in user_sessions and not birth:
+    # 没建档且没提供出生信息 → 引导
+    if key not in user_sessions:
         await update.message.reply_text(
-            "请先提供出生信息建档。\n例如：`1990年6月16日 凌晨2点 男`"
+            "请提供出生信息。\\n例如：`1990年6月16日 凌晨2点 男`"
         )
         return
 
-    # 情况3：已建档，发送了新的出生信息 → 更新档案
-    if key in user_sessions and birth:
-        msg = await update.message.reply_text("检测到新的出生信息，正在更新档案...")
-        try:
-            result = fortune_telling(**{k:v for k,v in birth.items() if k != "gender"}, gender=birth["gender"])
-            report = format_report(result)
-            user_sessions[key] = {
-                "birth_info": birth,
-                "bazi_result": result,
-                "bazi_report": report,
-            }
-            await msg.delete()
-            bazi = result["八字解读"]["八字"]
-            await update.message.reply_text(
-                f"档案已更新\n八字: **{bazi}**\n\n可以继续问事了。",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        except Exception as e:
-            await msg.delete()
-            await update.message.reply_text(f"计算出错: {e}")
-        return
-
-    # 情况4：已建档，问问题 → 先检查付费 → 回答
+    # 已建档，问问题 → 先检查付费 → 回答
     if not await check_paid(context, uid):
         await update.message.reply_text("如需使用命理服务，请先加入付费群。私聊管理员获取入群链接。")
         return
