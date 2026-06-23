@@ -486,10 +486,17 @@ def analyze_ri_gan_strength(si_zhu):
                    "申": "金", "酉": "金", "戌": "土",  # 秋
                    "亥": "水", "子": "水", "丑": "土"}  # 冬
 
+    # 四季月余气（辰→木余气，未→火余气，戌→金余气，丑→水余气）
+    season_residual = {"辰": "木", "未": "火", "戌": "金", "丑": "水"}
+
     season_wang = season_king[yue_zhi]
+    season_yu = season_residual.get(yue_zhi)
     if ri_wx == season_wang:
         de_ling = "旺"
         reasons.append(f"日干{ri_wx}得月令，生于{season_wang}旺之月")
+    elif season_yu and ri_wx == season_yu:
+        de_ling = "相"
+        reasons.append(f"日干{ri_wx}得月令余气（{yue_zhi}月{season_yu}之余气）")
     elif is_sheng(season_wang, ri_wx):
         de_ling = "相"
         reasons.append(f"日干{ri_wx}得月令相气")
@@ -555,7 +562,7 @@ def analyze_ri_gan_strength(si_zhu):
 # ============================================================
 
 def recommend_yong_shen(si_zhu, strength_info):
-    """用神推荐（扶抑法 + 调候法）"""
+    """用神推荐（特殊格局优先 → 扶抑法 + 调候法）"""
     strength = strength_info["强度等级"]
     ri_gan = si_zhu["日干"]
     ri_wx = TIAN_GAN_WU_XING[ri_gan]
@@ -564,6 +571,28 @@ def recommend_yong_shen(si_zhu, strength_info):
 
     yong_shen = []
     ji_shen = []
+
+    # 特殊格局优先检查
+    special = check_special_ge_ju(si_zhu)
+    zhuan_wang_list = {"曲直格", "炎上格", "从革格", "润下格", "稼穑格"}
+    if special and any(wg in special.get("格局", "") for wg in zhuan_wang_list):
+        ge_ju_name = special["格局"]
+        # 专旺格：顺势而为
+        sheng_ri = [wx for wx in ["木", "火", "土", "金", "水"] if is_sheng(wx, ri_wx)]  # 印星（生我）
+        ri_ke = [wx for wx in ["木", "火", "土", "金", "水"] if is_ke(ri_wx, wx)]  # 财星（我克）
+        ke_ri = [wx for wx in ["木", "火", "土", "金", "水"] if is_ke(wx, ri_wx)]  # 官杀（克我）
+        yong_shen = [ri_wx] + sheng_ri  # 用神：比劫 + 印星
+        ji_shen = ke_ri + ri_ke  # 忌神：官杀 + 财星
+        # 调候法：专旺格下不插入克日主的五行
+        if yue_zhi in ("亥", "子", "丑"):
+            if "火" not in yong_shen and not is_ke("火", ri_wx):
+                yong_shen.insert(0, "火")
+        elif yue_zhi in ("巳", "午", "未"):
+            if "水" not in yong_shen and not is_ke("水", ri_wx):
+                yong_shen.insert(0, "水")
+        yong_shen = list(dict.fromkeys(yong_shen))
+        ji_shen = list(dict.fromkeys(ji_shen))[:3]
+        return {"用神五行": yong_shen, "忌神五行": ji_shen, "方法": ge_ju_name}
 
     # 扶抑法
     if strength in ("旺", "强"):
@@ -674,6 +703,8 @@ def check_special_ge_ju(si_zhu):
         return {"藏干透出": "-", "十神": "-", "格局": "从革格（金专旺格）"}
     if ri_gan in ("壬", "癸") and set(zhi_set) & {"亥", "子", "丑", "辰"} == set(zhi_set):
         return {"藏干透出": "-", "十神": "-", "格局": "润下格（水专旺格）"}
+    if ri_gan in ("戊", "己") and set(zhi_set) & {"辰", "戌", "丑", "未"} == set(zhi_set):
+        return {"藏干透出": "-", "十神": "-", "格局": "稼穑格（土专旺格）"}
 
     return None
 
@@ -1006,10 +1037,12 @@ def cheng_gu_suan_ming(si_zhu, year, month, day, hour):
     
     # 公历转农历
     try:
-        lunar = ZhDate.from_datetime(year, month, day)
+        lunar = ZhDate.from_datetime(datetime(year, month, day))
         lunar_month = lunar.lunar_month
         lunar_day = lunar.lunar_day
     except Exception:
+        import warnings
+        warnings.warn(f"农历转换失败: {year}-{month}-{day}，回退公历月日，骨重可能不准确")
         lunar_month = month
         lunar_day = day
     
