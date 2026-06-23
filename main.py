@@ -423,6 +423,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Bot 尚未设置所有者，请先私聊 Bot 以认领所有权。"
                 )
                 return
+        # 群聊中只有 @bot 时才回复无权限提示
+        is_group = update.effective_chat.type in ("group", "supergroup")
+        if is_group and BOT_USERNAME not in text and BOT_USERNAME.lower() not in text.lower():
+            return
         await update.message.reply_text("抱歉，你尚未获得使用权限。请联系管理员开通。")
         return
 
