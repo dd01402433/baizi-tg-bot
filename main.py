@@ -22,23 +22,9 @@ logger = logging.getLogger("baizi-bot")
 user_sessions: dict[int, dict] = {}
 
 # ──── 白名单权限 ────
-# 环境变量说明：
-#   OWNER_ID         — Bot 所有者 Telegram user ID（整数），管理命令仅此用户可用
-#   ALLOWED_USER_IDS — 白名单用户 ID，逗号分隔（如 "123,456,789"）
-OWNER_ID: int = int(os.environ.get("OWNER_ID", "0"))
+# 首次启动未认领，第一个私聊 Bot 的用户自动成为所有者
+OWNER_ID: int = 0
 ALLOWED_USERS: set[int] = set()
-_raw_ids = os.environ.get("ALLOWED_USER_IDS", "")
-if _raw_ids:
-    for _id in _raw_ids.split(","):
-        _id = _id.strip()
-        if _id:
-            try:
-                ALLOWED_USERS.add(int(_id))
-            except ValueError:
-                pass
-# 所有者默认也在白名单中
-if OWNER_ID:
-    ALLOWED_USERS.add(OWNER_ID)
 
 # ──── 自然语言解析器 ────
 PERIOD_OFFSET = {"凌晨":0,"半夜":0,"深夜":0,"早上":8,"早晨":8,"上午":10,"中午":12,"正午":12,"下午":14,"傍晚":17,"黄昏":18,"晚上":20,"夜晚":20,"夜里":21}
@@ -418,6 +404,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid = update.effective_user.id
     if uid not in ALLOWED_USERS:
+        # 白名单为空 → 自动认领所有者
+        if not ALLOWED_USERS:
+            if update.effective_chat.type == "private":
+                global OWNER_ID
+                OWNER_ID = uid
+                ALLOWED_USERS.add(uid)
+                logger.info(f"自动认领所有者: {uid}")
+                await update.message.reply_text(
+                    "你已成为本 Bot 的所有者。使用 /adduser <user_id> 添加授权用户。"
+                )
+                return
+            else:
+                await update.message.reply_text(
+                    "Bot 尚未设置所有者，请先私聊 Bot 以认领所有权。"
+                )
+                return
         await update.message.reply_text("抱歉，你尚未获得使用权限。请联系管理员开通。")
         return
 
