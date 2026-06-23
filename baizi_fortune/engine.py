@@ -72,10 +72,11 @@ NA_YIN = [
 
 # 时辰对照
 SHI_CHEN = {
-    0: "子", 1: "子", 2: "丑", 3: "丑", 4: "寅", 5: "寅",
-    6: "卯", 7: "卯", 8: "辰", 9: "辰", 10: "巳", 11: "巳",
-    12: "午", 13: "午", 14: "未", 15: "未", 16: "申", 17: "申",
-    18: "酉", 19: "酉", 20: "戌", 21: "戌", 22: "亥", 23: "亥"
+    0: "子", 1: "丑", 2: "丑", 3: "寅", 4: "寅",
+    5: "卯", 6: "卯", 7: "辰", 8: "辰", 9: "巳", 10: "巳",
+    11: "午", 12: "午", 13: "未", 14: "未", 15: "申", 16: "申",
+    17: "酉", 18: "酉", 19: "戌", 20: "戌", 21: "亥", 22: "亥",
+    23: "子"
 }
 
 SHI_CHEN_NAME = {
@@ -238,8 +239,8 @@ def pai_si_zhu(year, month, day, hour, minute=0):
     nian_zhi = nian_gz[1]
 
     # 月柱
-    yue_zhi_idx = get_month_zhi_idx(month, day, year)
-    yue_zhi = DI_ZHI[yue_zhi_idx]
+    yue_zhi_idx = get_month_zhi_idx(month, day, year)  # 月建索引(寅=0)
+    yue_zhi = DI_ZHI[(yue_zhi_idx + 2) % 12]  # +2 转换为 DI_ZHI 标准索引(子=0)
     yue_gan_idx = wu_hu_dun(nian_gan, yue_zhi_idx)
     yue_gan = TIAN_GAN[yue_gan_idx]
     yue_gz = yue_gan + yue_zhi
