@@ -403,6 +403,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     uid = update.effective_user.id
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(f"你的 User ID: {uid}")
+
     if uid not in ALLOWED_USERS:
         # 白名单为空 → 自动认领所有者
         if not ALLOWED_USERS:
