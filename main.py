@@ -52,7 +52,7 @@ def parse_birth_info(text: str) -> Optional[dict]:
     hour, minute, has_t = 12, 0, False
     for sc, h in SHI_CHEN_TO_HOUR.items():
         if sc in text: hour, has_t = h, True; break
-    tm = re.search(r"(\d{1,2})\s*[点:：时]\s*(\d{1,2})?\s*(分)?", text)
+    tm = re.search(r"(\d{1,2})\s*[点點:：时時]\s*(\d{1,2})?\s*(分)?", text)
     if tm:
         rh, rm = int(tm.group(1)), int(tm.group(2)) if tm.group(2) else 0
         has_t = True
