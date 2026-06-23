@@ -21,6 +21,25 @@ logger = logging.getLogger("baizi-bot")
 # ──── 会话存储（Railway 重启会丢失，生产可换 Redis） ────
 user_sessions: dict[int, dict] = {}
 
+# ──── 白名单权限 ────
+# 环境变量说明：
+#   OWNER_ID         — Bot 所有者 Telegram user ID（整数），管理命令仅此用户可用
+#   ALLOWED_USER_IDS — 白名单用户 ID，逗号分隔（如 "123,456,789"）
+OWNER_ID: int = int(os.environ.get("OWNER_ID", "0"))
+ALLOWED_USERS: set[int] = set()
+_raw_ids = os.environ.get("ALLOWED_USER_IDS", "")
+if _raw_ids:
+    for _id in _raw_ids.split(","):
+        _id = _id.strip()
+        if _id:
+            try:
+                ALLOWED_USERS.add(int(_id))
+            except ValueError:
+                pass
+# 所有者默认也在白名单中
+if OWNER_ID:
+    ALLOWED_USERS.add(OWNER_ID)
+
 # ──── 自然语言解析器 ────
 PERIOD_OFFSET = {"凌晨":0,"半夜":0,"深夜":0,"早上":8,"早晨":8,"上午":10,"中午":12,"正午":12,"下午":14,"傍晚":17,"黄昏":18,"晚上":20,"夜晚":20,"夜里":21}
 SHI_CHEN_TO_HOUR = {"子时":0,"丑时":2,"寅时":4,"卯时":6,"辰时":8,"巳时":10,"午时":12,"未时":14,"申时":16,"酉时":18,"戌时":20,"亥时":22}
@@ -397,6 +416,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith("/"):
         return
 
+    uid = update.effective_user.id
+    if uid not in ALLOWED_USERS:
+        await update.message.reply_text("抱歉，你尚未获得使用权限。请联系管理员开通。")
+        return
+
     key, eff_user = get_session_key(update)
     cid, uid = key
     is_group = update.effective_chat.type in ("group", "supergroup")
@@ -484,6 +508,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i in range(0, len(answer), 3900):
             await update.message.reply_text(answer[i:i+3900], parse_mode=ParseMode.MARKDOWN)
 
+# ──── 白名单管理命令（仅所有者可用） ────
+def _is_owner(update: Update) -> bool:
+    return update.effective_user.id == OWNER_ID
+
+async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_owner(update):
+        await update.message.reply_text("仅 Bot 所有者可使用此命令。")
+        return
+    if not context.args:
+        await update.message.reply_text("用法: /adduser <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+        ALLOWED_USERS.add(uid)
+        await update.message.reply_text(f"已添加用户 {uid} 到白名单。")
+        logger.info(f"白名单添加: {uid}")
+    except ValueError:
+        await update.message.reply_text("无效的 user_id，请输入数字。")
+
+async def removeuser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_owner(update):
+        await update.message.reply_text("仅 Bot 所有者可使用此命令。")
+        return
+    if not context.args:
+        await update.message.reply_text("用法: /removeuser <user_id>")
+        return
+    try:
+        uid = int(context.args[0])
+        if uid == OWNER_ID:
+            await update.message.reply_text("不能移除所有者自身。")
+            return
+        if uid in ALLOWED_USERS:
+            ALLOWED_USERS.discard(uid)
+            await update.message.reply_text(f"已从白名单移除用户 {uid}。")
+            logger.info(f"白名单移除: {uid}")
+        else:
+            await update.message.reply_text(f"用户 {uid} 不在白名单中。")
+    except ValueError:
+        await update.message.reply_text("无效的 user_id，请输入数字。")
+
+async def listusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_owner(update):
+        await update.message.reply_text("仅 Bot 所有者可使用此命令。")
+        return
+    if not ALLOWED_USERS:
+        await update.message.reply_text("白名单为空。")
+        return
+    ids = sorted(ALLOWED_USERS)
+    lines = [f"• {uid}" for uid in ids]
+    await update.message.reply_text(f"白名单用户 ({len(ids)} 人)：\n" + "\n".join(lines))
+
 # ──── 主入口 ────
 def main():
     token = os.environ.get("TG_BOT_TOKEN", "")
@@ -497,6 +572,9 @@ def main():
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CommandHandler("groupid", groupid_cmd))
+    app.add_handler(CommandHandler("adduser", adduser_cmd))
+    app.add_handler(CommandHandler("removeuser", removeuser_cmd))
+    app.add_handler(CommandHandler("listusers", listusers_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("命理师 Bot 已启动")
