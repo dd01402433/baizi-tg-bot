@@ -788,27 +788,38 @@ def analyze_liu_qin(si_zhu, gender):
     """六亲分析"""
     ri_gan = si_zhu["日干"]
     shi_shen_info = analyze_shi_shen(si_zhu)
-
+    
+    # 获取十神信息
+    shi_shen_map = {}
+    for col, info in shi_shen_info["天干十神"].items():
+        shi_shen_map[info["天干"]] = info["十神"]
+    
+    # 计算六亲对应的十神
+    nian_gan_shen = shi_shen_map.get(si_zhu["年干"], "?")
+    yue_gan_shen = shi_shen_map.get(si_zhu["月干"], "?")
+    ri_cang_gan = DI_ZHI_CANG_GAN.get(si_zhu["日支"], [""])[0] if DI_ZHI_CANG_GAN.get(si_zhu["日支"]) else ""
+    ri_zhi_shen = get_shi_shen(ri_gan, ri_cang_gan) if ri_cang_gan else None
+    
     # 男命
     if gender == "男":
         return {
-            "祖父": f"年干({si_zhu['年干']})",
+            "祖父": f"年干({si_zhu['年干']}) - {nian_gan_shen}",
             "祖母": f"年支({si_zhu['年支']})",
-            "父亲": f"偏财看月干({si_zhu['月干']})",
-            "母亲": f"正印看月支({si_zhu['月支']})",
+            "父亲": f"月干({si_zhu['月干']}) - {yue_gan_shen}",
+            "母亲": f"月支({si_zhu['月支']}) - 正印",
             "兄弟": "比肩劫财",
-            "妻子": f"正财看日支({si_zhu['日支']})",
-            "子女": f"官杀为子，食伤为女，看时柱({si_zhu['时柱']})"
+            "妻子": f"日支({si_zhu['日支']}) - {ri_zhi_shen if ri_zhi_shen else '正财'}",
+            "子女": f"时柱({si_zhu['时柱']}) - 官杀为子，食伤为女"
         }
     else:
         return {
-            "祖父": f"年干({si_zhu['年干']})",
+            "祖父": f"年干({si_zhu['年干']}) - {nian_gan_shen}",
             "祖母": f"年支({si_zhu['年支']})",
-            "父亲": f"正财看月干",
-            "母亲": f"正印看月支({si_zhu['月支']})",
+            "父亲": f"月干({si_zhu['月干']}) - {yue_gan_shen}",
+            "母亲": f"月支({si_zhu['月支']}) - 正印",
             "兄弟": "比肩劫财",
-            "丈夫": f"正官看日支({si_zhu['日支']})",
-            "子女": f"食伤为子，看时柱({si_zhu['时柱']})"
+            "丈夫": f"日支({si_zhu['日支']}) - {ri_zhi_shen if ri_zhi_shen else '正官'}",
+            "子女": f"时柱({si_zhu['时柱']}) - 食伤为子"
         }
 
 # ============================================================
@@ -989,15 +1000,25 @@ CHENG_GU_GE_JUE = {
     7.1: "此命生成大不同，公侯卿相在其中，一生自有逍遥福，富贵荣华极品隆。"
 }
 
-def cheng_gu_suan_ming(si_zhu, month, day, hour):
+def cheng_gu_suan_ming(si_zhu, year, month, day, hour):
     """秤骨算命"""
+    from zhdate import ZhDate
+    
+    # 公历转农历
+    try:
+        lunar = ZhDate.from_datetime(year, month, day)
+        lunar_month = lunar.lunar_month
+        lunar_day = lunar.lunar_day
+    except Exception:
+        lunar_month = month
+        lunar_day = day
+    
     nian_gz = si_zhu["年柱"]
     shi_zhi = si_zhu["时支"]
-    lunar_month = month  # 此处简化，用公历月份近似
 
     nian_bone = float(YEAR_BONE.get(nian_gz, "0.0"))
     yue_bone = float(MONTH_BONE.get(lunar_month, "0.0"))
-    ri_bone = float(DAY_BONE.get(day, "0.0"))
+    ri_bone = float(DAY_BONE.get(lunar_day, "0.0"))
     shi_bone = float(SHI_BONE.get(shi_zhi, "0.0"))
 
     total = nian_bone + yue_bone + ri_bone + shi_bone
@@ -1011,6 +1032,8 @@ def cheng_gu_suan_ming(si_zhu, month, day, hour):
     level = "上等" if total >= 5 else ("中上" if total >= 4 else ("中等" if total >= 3 else "下等"))
 
     return {
+        "农历月": lunar_month,
+        "农历日": lunar_day,
         "年骨重": f"{nian_bone:.1f}两",
         "月骨重": f"{yue_bone:.1f}两",
         "日骨重": f"{ri_bone:.1f}两",
@@ -1043,7 +1066,7 @@ def fortune_telling(year, month, day, hour, minute=0, gender="男"):
     reading = comprehensive_reading(si_zhu, gender)
 
     # 秤骨算命
-    cheng_gu = cheng_gu_suan_ming(si_zhu, month, day, hour)
+    cheng_gu = cheng_gu_suan_ming(si_zhu, year, month, day, hour)
 
     # 六亲
     liu_qin = analyze_liu_qin(si_zhu, gender)
